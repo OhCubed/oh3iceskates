@@ -1,0 +1,48 @@
+[
+  {
+    "ingredientPattern": "LKL,L_L,B_B",
+    "ingredients": {
+      "L": {
+        "type": "item",
+        "code": "game:leather-*"
+      },
+      "K": {
+        "type": "item",
+        "code": "game:knife-*",
+        "isTool": true,
+        "toolDurabilityCost": 2
+      },
+      "B": {
+        "type": "item",
+        "code": "game:bone"
+      }
+    },
+    "width": 3,
+    "height": 3,
+    "output": {
+      "type": "item",
+      "code": "iceskates-bone"
+    }
+  },
+  {
+    "ingredientPattern": "L_L,L_L,M_M",
+    "ingredients": {
+      "L": {
+        "type": "item",
+        "code": "game:leather-*"
+      },
+      "M": {
+        "type": "item",
+        "code": "game:knifeblade-*",
+        "name": "metal",
+        "allowedVariants": [ "copper", "tinbronze", "bismuthbronze", "blackbronze", "iron", "meteoriciron", "steel" ]
+      }
+    },
+    "width": 3,
+    "height": 3,
+    "output": {
+      "type": "item",
+      "code": "iceskates-{metal}"
+    }
+  }
+]

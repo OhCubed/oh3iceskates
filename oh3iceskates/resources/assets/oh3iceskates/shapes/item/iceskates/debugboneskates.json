@@ -1,0 +1,47 @@
+{
+	"editor": {
+		"allAngles": false,
+		"entityTextureMode": false
+	},
+	"textureWidth": 16,
+	"textureHeight": 16,
+	"textureSizes": {
+	},
+	"textures": {
+		"metal": "game:block/creature/bone"
+	},
+	"elements": [
+		{
+			"name": "Left Boot",
+			"stepParentName": "LowerFootL",
+			"from": [ -0.5, -0.2, -0.5 ],
+			"to": [ 4.5, 2.8, 3.5 ],
+			"rotationOrigin": [ -0.5, -0.2, -0.5 ],
+			"faces": {
+				"north": { "texture": "#metal", "uv": [ 0.0, 0.0, 5.0, 3.0 ] },
+				"east": { "texture": "#metal", "uv": [ 0.0, 0.0, 4.0, 3.0 ] },
+				"south": { "texture": "#metal", "uv": [ 0.0, 0.0, 5.0, 3.0 ] },
+				"west": { "texture": "#metal", "uv": [ 0.0, 0.0, 4.0, 3.0 ] },
+				"up": { "texture": "#metal", "uv": [ 0.0, 0.0, 5.0, 4.0 ] },
+				"down": { "texture": "#metal", "uv": [ 0.0, 0.0, 5.0, 4.0 ] }
+			}
+		},
+		{
+			"name": "Right Boot",
+			"stepParentName": "LowerFootR",
+			"from": [ -0.5, -0.2, -0.5 ],
+			"to": [ 4.5, 2.8, 3.5 ],
+			"rotationOrigin": [ -0.5, -0.2, -0.5 ],
+			"faces": {
+				"north": { "texture": "#metal", "uv": [ 0.0, 0.0, 5.0, 3.0 ] },
+				"east": { "texture": "#metal", "uv": [ 0.0, 0.0, 4.0, 3.0 ] },
+				"south": { "texture": "#metal", "uv": [ 0.0, 0.0, 5.0, 3.0 ] },
+				"west": { "texture": "#metal", "uv": [ 0.0, 0.0, 4.0, 3.0 ] },
+				"up": { "texture": "#metal", "uv": [ 0.0, 0.0, 5.0, 4.0 ] },
+				"down": { "texture": "#metal", "uv": [ 0.0, 0.0, 5.0, 4.0 ] }
+			}
+		}
+	],
+	"animations": [
+	]
+}

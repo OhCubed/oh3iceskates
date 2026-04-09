@@ -1,0 +1,14 @@
+[
+  {
+    "file": "game:entities/humanoid/player.json",
+    "op": "add",
+    "path": "/server/behaviors/-",
+    "value": { "code": "iceskater" }
+  },
+  {
+    "file": "game:entities/humanoid/player.json",
+    "op": "add",
+    "path": "/client/behaviors/-",
+    "value": { "code": "iceskater" }
+  }
+]
