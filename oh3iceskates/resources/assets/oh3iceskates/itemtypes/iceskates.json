@@ -4,7 +4,7 @@
   "variantgroups": [
     {
       "code": "metal",
-      "states": [ "bone", "copper", "tinbronze", "bismuthbronze", "blackbronze", "iron", "meteoriciron", "steel" ]
+      "states": [ "bone", "tinbronze", "bismuthbronze", "blackbronze", "iron", "meteoriciron", "steel" ]
     }
   ],
   "shape": { "base": "oh3iceskates:item/iceskates/debugskates" },
@@ -24,7 +24,6 @@
     "isSkates": true,
     "skateSpeedBonusByType": {
       "*-bone": 1.4,
-      "*-copper": 1.4,
       "*-tinbronze": 1.8,
       "*-bismuthbronze": 1.8,
       "*-blackbronze": 1.8,
@@ -33,29 +32,53 @@
       "*-steel": 2.5
     },
     "skateHandlingByType": {
-      "*-bone": 0.1,
-      "*-copper": 0.5,
-      "*-tinbronze": 0.5,
+      "*-bone": 0.15,
+      "*-tinbronze": 0.4,
       "*-bismuthbronze": 0.5,
-      "*-blackbronze": 0.5,
-      "*-iron": 0.5,
-      "*-meteoriciron": 0.5,
-      "*-steel": 1
+      "*-blackbronze": 0.25,
+      "*-iron": 0.6,
+      "*-meteoriciron": 0.6,
+      "*-steel": 0.7
+    },
+    "skateAccelerationByType": {
+      "*-bone": 0.1,
+      "*-tinbronze": 0.14,
+      "*-bismuthbronze": 0.12,
+      "*-blackbronze": 0.16,
+      "*-iron": 0.18,
+      "*-meteoriciron": 0.18,
+      "*-steel": 0.2
     },
     "skateBiteByType": {
       "*-bone": 20,
-      "*-copper": 5,
-      "*-tinbronze": 5,
-      "*-bismuthbronze": 5,
-      "*-blackbronze": 5,
-      "*-iron": 5,
-      "*-meteoriciron": 5,
-      "*-steel": 5
+      "*-tinbronze": 18,
+      "*-bismuthbronze": 20,
+      "*-blackbronze": 25,
+      "*-iron": 20,
+      "*-meteoriciron": 20,
+      "*-steel": 20
+    },
+    "skateFrictionByType": {
+      "*-bone": 1,
+      "*-tinbronze": 0.995,
+      "*-bismuthbronze": 0.995,
+      "*-blackbronze": 0.995,
+      "*-iron": 0.995,
+      "*-meteoriciron": 0.995,
+      "*-steel": 0.998
+    },
+    "skateSpringByType": {
+      "*-bone": 0.6,
+      "*-tinbronze": 0.5  ,
+      "*-bismuthbronze": 0.7,
+      "*-blackbronze": 0.3,
+      "*-iron": 0.4,
+      "*-meteoriciron": 0.4,
+      "*-steel": 0.4
     }
   },
   "durabilityByType": {
     "*-bone": 800,
-    "*-copper": 1000,
     "*-tinbronze": 1500,
     "*-bismuthbronze": 1500,
     "*-blackbronze": 1500,

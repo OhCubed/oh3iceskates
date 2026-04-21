@@ -8,11 +8,15 @@ namespace oh3iceskates
 {
     public class IceSkatesModSystem : ModSystem
     {
-        // Expose the config to other classes (read-only from the outside)
+        // Client-side local config (fallback/local authority)
         public static IceSkatesConfig Config { get; private set; }
 
-        // Tracks all physics controllers currently loaded in the world
-        public HashSet<IceSkatesPhysics> ActivePhysicsControllers = new HashSet<IceSkatesPhysics>();
+        // Server-side multiplayer tracking: Maps Player UID to their authoritative config
+        public Dictionary<string, IceSkatesConfig> PlayerConfigs { get; private set; } = new Dictionary<string, IceSkatesConfig>();
+
+        // Replaced HashSet with a List. Lists are much more cache-friendly and allow 
+        // allocation-free iteration via 'for' loops, eliminating GC spikes.
+        public List<IceSkatesPhysics> ActivePhysicsControllers = new List<IceSkatesPhysics>();
 
         private IServerNetworkChannel serverChannel;
         private IClientNetworkChannel clientChannel;
@@ -21,7 +25,7 @@ namespace oh3iceskates
         {
             base.Start(api);
 
-            // Register our custom behavior and items
+            // Register custom behavior and items
             api.RegisterEntityBehaviorClass("iceskater", typeof(EntityBehaviorIceSkater));
             api.RegisterItemClass("ItemIceSkates", typeof(ItemIceSkates));
 
@@ -35,35 +39,37 @@ namespace oh3iceskates
 
         public override void StartServerSide(ICoreServerAPI api)
         {
-            // 1. Load the config (Only on the server!)
-            LoadServerConfig(api);
-
             serverChannel = api.Network.GetChannel("iceskates");
 
-            // Send config to players when they join
-            api.Event.PlayerJoin += (byPlayer) =>
+            // Listen for the authoritative config from the client and store it per-player
+            serverChannel.SetMessageHandler<IceSkatesConfig>((player, packet) =>
             {
-                serverChannel.SendPacket(Config, byPlayer);
+                PlayerConfigs[player.PlayerUID] = packet;
+                api.Logger.VerboseDebug("Received authoritative client config for Ice Skates from player {0}.", player.PlayerName);
+            });
+
+            // Prevent memory leaks by cleaning up the dictionary when a player leaves
+            api.Event.PlayerDisconnect += (player) =>
+            {
+                PlayerConfigs.Remove(player.PlayerUID);
             };
         }
 
         public override void StartClientSide(ICoreClientAPI api)
         {
-            // Initialize with defaults so the client doesn't crash before the server packet arrives!
-            // Because we aren't calling api.LoadModConfig, no file is ever created on the client's PC.
-            Config = new IceSkatesConfig();
+            // 1. Load the config (Client authoritative)
+            LoadClientConfig(api);
 
             clientChannel = api.Network.GetChannel("iceskates");
 
-            // 2. Listen for the authoritative config from the server
-            clientChannel.SetMessageHandler<IceSkatesConfig>((packet) =>
+            // Send config to the server once the client finishes loading the level
+            api.Event.LevelFinalize += () =>
             {
-                Config = packet; // Overwrite the client's memory with the server's config
-                api.Logger.Event("Received authoritative server config for Ice Skates.");
-            });
+                clientChannel.SendPacket(Config);
+            };
         }
 
-        private void LoadServerConfig(ICoreServerAPI api)
+        private void LoadClientConfig(ICoreClientAPI api)
         {
             try
             {
@@ -85,12 +91,27 @@ namespace oh3iceskates
 
         private void OnGlobalPhysicsTick(float dt)
         {
-            foreach (var physics in ActivePhysicsControllers)
+            // A reverse for-loop generates 0 memory allocations (no GC spikes).
+            // It also allows elements to safely be removed from the list during the loop without throwing out-of-bounds errors.
+            for (int i = ActivePhysicsControllers.Count - 1; i >= 0; i--)
             {
-                // The physics controller itself checks IsActive, so it will 
-                // efficiently early-out if the player isn't actually on ice.
-                physics.OnPhysicsTick(dt);
+                ActivePhysicsControllers[i].OnPhysicsTick(dt);
             }
+        }
+
+        /// <summary>
+        /// Retrieves the correct config based on the execution side and player.
+        /// Call this from your behavior/physics class instead of accessing Config directly.
+        /// </summary>
+        public IceSkatesConfig GetConfigForPlayer(string playerUid)
+        {
+            if (PlayerConfigs.TryGetValue(playerUid, out var config))
+            {
+                return config;
+            }
+
+            // Fallback to local config if server dictionary misses, or if called on the client.
+            return Config ?? new IceSkatesConfig();
         }
     }
 }

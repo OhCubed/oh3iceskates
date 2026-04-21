@@ -35,7 +35,7 @@
         "type": "item",
         "code": "game:knifeblade-*",
         "name": "metal",
-        "allowedVariants": [ "copper", "tinbronze", "bismuthbronze", "blackbronze", "iron", "meteoriciron", "steel" ]
+        "allowedVariants": [ "tinbronze", "bismuthbronze", "blackbronze", "iron", "meteoriciron", "steel" ]
       }
     },
     "width": 3,

@@ -1,3 +1,5 @@
 <Solution>
-  <Project Path="oh3iceskates/oh3iceskates.csproj" />
+  <Project Path="oh3iceskates/oh3iceskates.csproj">
+    <BuildType Project="Debug" />
+  </Project>
 </Solution>
