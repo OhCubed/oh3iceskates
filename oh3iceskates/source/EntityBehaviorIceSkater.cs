@@ -7,23 +7,23 @@ using Vintagestory.API.Datastructures;
 
 namespace oh3iceskates
 {
-    // 1. Separate Physics Controller
+    // Physics controller responsible for handling custom ice skating movement and momentum.
     public class IceSkatesPhysics
     {
         public bool IsActive { get; set; }
         public float SkateSpeedBonus { get; set; } = 1.0f;
         public float SkateHandling { get; set; } = 0.5f;
 
-        // NEW: Skate Bite deviation threshold (in degrees)
+        // Skate bite deviation threshold (in degrees)
         public float SkateBite { get; set; } = 5f;
 
-        // NEW: Skate Acceleration
+        // Base acceleration when skating
         public float SkateAcceleration { get; set; } = 2f;
 
-        // NEW: Skate Friction
+        // Base friction applied when skating
         public float SkateFriction { get; set; } = 0.995f;
 
-        // NEW: Skate Spring (Momentum return multiplier)
+        // Multiplier for momentum return after crouching
         public float SkateSpring { get; set; } = 0.5f;
 
         // Cached from behavior to prevent string lookups in the 0ms tick
@@ -32,7 +32,6 @@ namespace oh3iceskates
 
         private Entity entity;
         private EntityPlayer entityPlayer;
-        private bool? isLocalClient;
 
         // Variables used to bypass vanilla engine friction
         private double lastVx = 0;
@@ -49,13 +48,16 @@ namespace oh3iceskates
         private double speedBeforeBraking = 0.0;
         private bool wasSneaking = false;
 
+        private double lastSweetspot = -1.0;
+        private double cachedCurveExponent = 1.0;
+
         public IceSkatesPhysics(Entity entity)
         {
             this.entity = entity;
             this.entityPlayer = entity as EntityPlayer;
         }
 
-        // Called every physics tick by the centralized ModSystem
+        // Called every physics tick by the local behavior's tick listener
         public void OnPhysicsTick(float dt)
         {
             if (!IsActive || entityPlayer == null)
@@ -64,32 +66,8 @@ namespace oh3iceskates
                 return;
             }
 
-            // --- MULTIPLAYER FIX ---
-            // Player physics is client-authoritative. 
-            // The Server shouldn't override motion manually (causes rubber-banding).
-            // The Client shouldn't simulate motion for remote players (causes stuttering).
-            if (entity.World.Side == EnumAppSide.Server) return;
-
-            // Safely resolve and cache the local client authority check after the world finishes loading
-            if (isLocalClient == null)
-            {
-                var capi = entity.World.Api as ICoreClientAPI;
-                if (capi?.World?.Player != null)
-                {
-                    isLocalClient = (entityPlayer.PlayerUID == capi.World.Player.PlayerUID);
-                }
-                else
-                {
-                    return; // Wait until player is fully loaded
-                }
-            }
-
-            if (isLocalClient == false) return;
-            // -----------------------
-
-            // Grab the globally synced config. Fallback just in case config hasn't synced
-            IceSkatesConfig cfg = Config ?? IceSkatesModSystem.Config;
-            if (cfg == null) return;
+            // Grab the globally synced config passed down from the behavior. Fallback just in case.
+            IceSkatesConfig cfg = Config ?? new IceSkatesConfig();
 
             bool isSneaking = entityPlayer.Controls.Sneak;
 
@@ -100,7 +78,7 @@ namespace oh3iceskates
             // Fetch BiteHandling from config (default to 0.8)
             double currentBiteHandling = cfg.BiteHandling;
 
-            // Slalom specific config fetching
+            // Slalom-specific config variables
             double currentSlalomBoost = cfg.SlalomBoost;
             double currentSlalomWindow = cfg.SlalomWindow;
             double currentSpeedCeiling = cfg.SpeedCeiling;
@@ -112,9 +90,14 @@ namespace oh3iceskates
             bool debugMode = cfg.DebugMode;
 
             // Pre-calculate the exponent needed to stretch the bell curve's 80% threshold 
-            // across the configured Sweetspot percentage of the window.
-            double safeSweetspot = Math.Max(0.01, Math.Min(0.99, currentSlalomSweetspot));
-            double curveExponent = Math.Log(0.8) / Math.Log(Math.Cos(safeSweetspot * GameMath.PI / 2.0));
+            // across the configured Sweetspot percentage of the window. We cache this to avoid 
+            // expensive Math.Log and Math.Cos calls every single tick.
+            if (currentSlalomSweetspot != lastSweetspot)
+            {
+                double safeSweetspot = Math.Max(0.01, Math.Min(0.99, currentSlalomSweetspot));
+                cachedCurveExponent = Math.Log(0.8) / Math.Log(Math.Cos(safeSweetspot * GameMath.PI / 2.0));
+                lastSweetspot = currentSlalomSweetspot;
+            }
 
             if (entity.OnGround)
             {
@@ -132,8 +115,8 @@ namespace oh3iceskates
                         if (progress > 0.0 && progress < 1.0)
                         {
                             // A sine wave naturally makes a bell shape. 
-                            // By raising it to an exponent, we can dynamically widen or narrow the peak!
-                            currentCurve = Math.Pow(GameMath.Sin((float)(progress * GameMath.PI)), curveExponent);
+                            // By raising it to an exponent, we can dynamically widen or narrow the peak.
+                            currentCurve = Math.Pow(GameMath.Sin((float)(progress * GameMath.PI)), cachedCurveExponent);
                         }
                     }
                 }
@@ -143,9 +126,8 @@ namespace oh3iceskates
                 double vx = entity.Pos.Motion.X;
                 double vz = entity.Pos.Motion.Z;
 
-                // 1. Bypass Vanilla Friction
-                // If we collided with a wall, we must respect the engine's velocity (which zeroes out).
-                // Otherwise, we load our stored velocity from the previous tick, erasing vanilla ground drag.
+                // Bypass vanilla friction by restoring the velocity from the previous tick, 
+                // unless a horizontal collision occurred.
                 if (entity.CollidedHorizontally || !wasActive)
                 {
                     lastVx = vx;
@@ -175,7 +157,7 @@ namespace oh3iceskates
                     speedBeforeBraking = 0.0;
                 }
 
-                // 2. Apply Custom Configured Friction
+                // Apply custom configured friction
                 // Dynamic Brake Friction scaling
                 double currentFrictionMult = SkateFriction;
                 if (isSneaking)
@@ -191,7 +173,7 @@ namespace oh3iceskates
                     // It shrinks incredibly slowly at the top end and plummets violently right before a standstill.
                     double curve = Math.Pow(speedRatio, 0.097);
 
-                    // FIX: Dynamic floor relative to the globally configured BrakeFriction.
+                    // Establish a dynamic floor relative to the globally configured brake friction.
                     double brakeFloor = Math.Max(0.0, currentBrakeFriction - 0.1);
                     currentFrictionMult = brakeFloor + (currentBrakeFriction - brakeFloor) * curve;
                 }
@@ -211,7 +193,7 @@ namespace oh3iceskates
                 // This lets us safely decay excess speed without instantly braking the player.
                 double speedBeforeAccelSq = vx * vx + vz * vz;
 
-                // 3. Calculate Wish Direction (where the player wants to go)
+                // Calculate the wish direction (the direction the player wants to move)
                 double wishX = 0;
                 double wishZ = 0;
                 double rawInputX = 0; // Pure camera + keys direction
@@ -219,9 +201,7 @@ namespace oh3iceskates
 
                 if (entityPlayer.Controls.TriesToMove)
                 {
-                    // GC SPIKE FIX: We no longer call entity.Pos.GetViewVector().
-                    // That method creates a 'new Vec3f()' every tick, allocating memory.
-                    // Instead, we manually pull the Yaw and do the math ourselves allocation-free!
+                    // Calculate the forward and right vectors manually using Yaw to avoid memory allocations
                     float yaw = entity.Pos.Yaw;
                     double camFwdX = GameMath.Sin(yaw);
                     double camFwdZ = GameMath.Cos(yaw);
@@ -245,7 +225,7 @@ namespace oh3iceskates
                         rawInputX = wishX;
                         rawInputZ = wishZ;
 
-                        // --- SLALOM / CARVE BOOST LOGIC ---
+                        // Slalom / Carve Boost Logic
                         double currentWishAngle = Math.Atan2(wishX, wishZ);
                         if (hasLastWishAngle)
                         {
@@ -260,7 +240,7 @@ namespace oh3iceskates
                             if (deltaAngle > 0.005) currentTurnDirection = 1;
                             else if (deltaAngle < -0.005) currentTurnDirection = -1;
 
-                            // The player must turn in the OPPOSITE direction of their last carve to get the bonus again!
+                            // The player must turn in the OPPOSITE direction of their last carve to get the bonus again
                             if (currentTurnDirection != 0 && currentTurnDirection != lastTurnDirection)
                             {
                                 lastTurnDirection = currentTurnDirection;
@@ -273,9 +253,8 @@ namespace oh3iceskates
                         }
                         lastWishAngle = currentWishAngle;
                         hasLastWishAngle = true;
-                        // ----------------------------------
 
-                        // 4. Carving / Momentum Recycling (Strong Lerp)
+                        // Carving and Momentum Recycling (Strong Lerp)
                         // We bend the current velocity vector towards the desired wish direction, 
                         // preserving the magnitude entirely so no momentum is lost during turns.
                         double currentSpeed = Math.Sqrt(vx * vx + vz * vz);
@@ -314,7 +293,7 @@ namespace oh3iceskates
                                 double idealVx = newDirX * currentSpeed;
                                 double idealVz = newDirZ * currentSpeed;
 
-                                // --- Skate Bite Logic ---
+                                // Skate Bite Logic
                                 double appliedHandling = SkateHandling;
 
                                 // Use the dot product as a highly efficient way to check angle deviation
@@ -337,7 +316,7 @@ namespace oh3iceskates
                             }
                         }
 
-                        // 5. Gradual Acceleration
+                        // Apply gradual acceleration towards the top speed limit
                         // Allow the player to temporarily accelerate towards a higher ceiling if boosting
                         double boostedTopSpeed = topSpeedLimit;
                         if (boostTimerMs > 0)
@@ -349,7 +328,7 @@ namespace oh3iceskates
                             // If their coasting top speed is naturally higher, we don't punish them for slaloming
                             if (slalomCeiling > topSpeedLimit)
                             {
-                                // Smoothly scale the ceiling using the bell curve!
+                                // Smoothly scale the ceiling using the bell curve
                                 boostedTopSpeed = topSpeedLimit + (slalomCeiling - topSpeedLimit) * currentCurve;
                             }
                         }
@@ -364,11 +343,8 @@ namespace oh3iceskates
                             double addSpeed = boostedTopSpeed - currentSpeedInWishDir;
                             double accelSpeed = accelStep * boostedTopSpeed;
 
-                            // FIX: Friction Equilibrium Plateau
-                            // If the player is actively accelerating but friction is dragging them down, 
-                            // they can get trapped at an equilibrium speed lower than the topSpeed limit.
-                            // Here we inject the exact amount of speed lost to friction back into the acceleration 
-                            // force to guarantee they can physically reach the config speed cap.
+                            // Compensate for friction loss during active acceleration to ensure the player 
+                            // can reach the top speed limit without hitting an equilibrium plateau.
                             if (timeNormalizedFriction < 1.0 && currentSpeedInWishDir > 0)
                             {
                                 double frictionLoss = currentSpeedInWishDir * (1.0 / timeNormalizedFriction - 1.0);
@@ -388,7 +364,7 @@ namespace oh3iceskates
                     hasLastWishAngle = false;
                 }
 
-                // --- NEW: Skate Spring (Momentum Dump) ---
+                // Skate Spring (Momentum Dump)
                 if (releasedCrouch)
                 {
                     double speedLost = Math.Max(0, speedBeforeBraking - currentAbsSpeed);
@@ -428,7 +404,7 @@ namespace oh3iceskates
                     speedBeforeBraking = 0;
                 }
 
-                // 6. Dynamic Maximum Speed Cap.
+                // Enforce a dynamic maximum speed cap based on the slalom boost and spring momentum.
                 double boostedLimit = topSpeedLimit;
 
                 if (boostTimerMs > 0)
@@ -445,7 +421,7 @@ namespace oh3iceskates
 
                 // The dynamic cap accommodates both our slalom ceiling AND any external momentum.
                 // If the player drops the rhythm and loses the buff, dynamicCapSq smoothly catches 
-                // them and lets friction organically decelerate them back down to the normal limit!
+                // them and lets friction organically decelerate them back down to the normal limit.
                 double dynamicCapSq = Math.Max(boostedLimitSq, speedBeforeAccelSq);
                 double absSpeedSq = vx * vx + vz * vz;
 
@@ -461,10 +437,10 @@ namespace oh3iceskates
                 {
                     double currentSpeedCalc = Math.Sqrt(vx * vx + vz * vz);
                     double dynamicCapCalc = Math.Sqrt(dynamicCapSq);
-                    Console.WriteLine($"[IceSkates] CurSpeed: {currentSpeedCalc:F4} | TopSpeed: {topSpeedLimit:F4} | DynCap: {dynamicCapCalc:F4} | SlalomLimit: {boostedLimit:F4} | Curve: {currentCurve:F2}");
+                    entity.World.Api.Logger.Debug($"[IceSkates] CurSpeed: {currentSpeedCalc:F4} | TopSpeed: {topSpeedLimit:F4} | DynCap: {dynamicCapCalc:F4} | SlalomLimit: {boostedLimit:F4} | Curve: {currentCurve:F2}");
                 }
 
-                // 7. Apply to entity and store state for the next tick
+                // Apply velocity to the entity and store the state for the next tick
                 entity.Pos.Motion.X = vx;
                 entity.Pos.Motion.Z = vz;
 
@@ -537,7 +513,7 @@ namespace oh3iceskates
         }
     }
 
-    // 2. The Main Behavior
+    // Entity behavior that manages the activation and properties of the ice skating physics.
     public class EntityBehaviorIceSkater : EntityBehavior
     {
         private IceSkatesModSystem modSystem;
@@ -556,6 +532,18 @@ namespace oh3iceskates
         private BlockPos tmpPos = new BlockPos();
 
         private IceSkatesPhysics physicsController;
+        private long? clientPhysicsTickId;
+        private bool localPlayerChecked = false;
+
+        // Caches item attributes to prevent expensive JSON parsing every tick
+        private int lastFootItemId = -1;
+        private bool cachedIsSkates = false;
+        private float cachedSpeedBonus = 1.2f;
+        private float cachedHandling = 0.5f;
+        private float cachedBite = 5f;
+        private float cachedAcceleration = 2f;
+        private float cachedFriction = 0.995f;
+        private float cachedSpring = 0.5f;
 
         // Tracks the server's last known state to prevent network spam
         private bool lastServerWearingSkates = false;
@@ -582,10 +570,8 @@ namespace oh3iceskates
             entityPlayer = entity as EntityPlayer;
             lastPos.Set(entity.Pos.X, entity.Pos.Y, entity.Pos.Z);
 
-            physicsController = new IceSkatesPhysics(entity);
-
-            // Using the List allocation free method established in IceSkatesModSystem.cs
-            modSystem?.ActivePhysicsControllers.Add(physicsController);
+            // We no longer blindly register physics for every player here! 
+            // We wait until OnGameTick can verify if this entity belongs to the local client.
         }
 
         public override void OnGameTick(float deltaTime)
@@ -593,6 +579,22 @@ namespace oh3iceskates
             base.OnGameTick(deltaTime);
 
             if (entityPlayer?.Player == null) return;
+
+            // VINTAGE STORY CONVENTION: Wait until the client world is fully loaded to verify 
+            // if this entity is the LOCAL player. Only the local player gets a 0ms physics controller.
+            if (entity.World.Side == EnumAppSide.Client && !localPlayerChecked)
+            {
+                var capi = entity.World.Api as ICoreClientAPI;
+                if (capi?.World?.Player != null)
+                {
+                    localPlayerChecked = true;
+                    if (entityPlayer.PlayerUID == capi.World.Player.PlayerUID)
+                    {
+                        physicsController = new IceSkatesPhysics(entity);
+                        clientPhysicsTickId = entity.World.RegisterGameTickListener(physicsController.OnPhysicsTick, 0);
+                    }
+                }
+            }
 
             // Pull the correct configuration from the ModSystem Dictionary early
             IceSkatesConfig currentConfig = modSystem?.GetConfigForPlayer(entityPlayer.PlayerUID);
@@ -604,91 +606,107 @@ namespace oh3iceskates
             }
 
             // Pass the slower-updating WalkSpeed stat and config down to the 0ms Physics class
+            // This safely bypasses remote players because their physicsController remains null!
             if (physicsController != null)
             {
                 physicsController.PlayerWalkSpeed = entity.Stats.GetBlended("walkspeed");
                 physicsController.Config = currentConfig;
             }
 
-            double dx = entity.Pos.X - lastPos.X;
-            double dz = entity.Pos.Z - lastPos.Z;
-            double distTraveled = Math.Sqrt(dx * dx + dz * dz);
-
-            // Cap to prevent massive jumps (like teleports) from dealing instant durability damage
-            if (distTraveled > 10.0) distTraveled = 0;
-            lastPos.Set(entity.Pos.X, entity.Pos.Y, entity.Pos.Z);
-
             ItemSlot footSlot = null;
+            double distTraveled = 0;
 
             if (entity.World.Side == EnumAppSide.Server)
             {
+                // MOVED: Distance calculation is only used by the server for durability damage.
+                // Calculating square roots and deltas on the client every tick was wasted CPU.
+                double dx = entity.Pos.X - lastPos.X;
+                double dz = entity.Pos.Z - lastPos.Z;
+                distTraveled = Math.Sqrt(dx * dx + dz * dz);
+
+                // Cap to prevent massive jumps (like teleports) from dealing instant durability damage
+                if (distTraveled > 10.0) distTraveled = 0;
+                lastPos.Set(entity.Pos.X, entity.Pos.Y, entity.Pos.Z);
+
                 if (characterInv == null)
                 {
                     characterInv = entityPlayer.Player.InventoryManager.GetOwnInventory("character");
                 }
 
-                bool serverWearingSkates = false;
-                float serverSkateSpeedBonus = 1.2f;
-                float serverSkateHandling = 0.5f;
-                float serverSkateBite = 5f;
-                float serverSkateAcceleration = 2f;
-                float serverSkateFriction = 0.995f;
-                float serverSkateSpring = 0.5f;
-
                 if (characterInv != null)
                 {
                     footSlot = characterInv[(int)EnumCharacterDressType.Foot];
-                    serverWearingSkates = footSlot != null && !footSlot.Empty &&
-                                          footSlot.Itemstack.Collectible.Attributes?["isSkates"]?.AsBool(false) == true;
+                    int currentItemId = footSlot?.Itemstack?.Collectible?.Id ?? -1;
 
-                    if (serverWearingSkates)
+                    // Only parse the item's JSON attributes if the equipped footwear actually changes
+                    if (currentItemId != lastFootItemId)
                     {
-                        serverSkateSpeedBonus = GetSkateSpeedBonus(footSlot.Itemstack);
-                        serverSkateHandling = GetSkateHandling(footSlot.Itemstack);
-                        serverSkateBite = GetSkateBite(footSlot.Itemstack);
-                        serverSkateAcceleration = GetSkateAcceleration(footSlot.Itemstack, serverSkateAcceleration);
-                        serverSkateFriction = GetSkateFriction(footSlot.Itemstack, serverSkateFriction);
-                        serverSkateSpring = GetSkateSpring(footSlot.Itemstack, serverSkateSpring);
+                        lastFootItemId = currentItemId;
+                        if (footSlot != null && !footSlot.Empty)
+                        {
+                            var attributes = footSlot.Itemstack.Collectible.Attributes;
+                            cachedIsSkates = attributes?["isSkates"]?.AsBool(false) ?? false;
+
+                            if (cachedIsSkates)
+                            {
+                                cachedSpeedBonus = attributes?["skateSpeedBonus"]?.AsFloat(1.2f) ?? 1.2f;
+                                cachedHandling = attributes?["skateHandling"]?.AsFloat(0.5f) ?? 0.5f;
+                                cachedBite = attributes?["skateBite"]?.AsFloat(5f) ?? 5f;
+                                cachedAcceleration = attributes?["skateAcceleration"]?.AsFloat(2f) ?? 2f;
+                                cachedFriction = attributes?["skateFriction"]?.AsFloat(0.995f) ?? 0.995f;
+                                cachedSpring = attributes?["skateSpring"]?.AsFloat(0.5f) ?? 0.5f;
+                            }
+                        }
+                        else
+                        {
+                            cachedIsSkates = false;
+                        }
                     }
                 }
 
-                // Sync the properties dynamically to the client ONLY if they changed.
-                // Setting WatchedAttributes every tick forces network syncs and triggers 
-                // UI redraws on the client, which causes severe inventory and hotbar lag.
-                if (serverWearingSkates != lastServerWearingSkates ||
-                    serverSkateSpeedBonus != lastServerSkateSpeedBonus ||
-                    serverSkateHandling != lastServerSkateHandling ||
-                    serverSkateBite != lastServerSkateBite ||
-                    serverSkateAcceleration != lastServerSkateAcceleration ||
-                    serverSkateFriction != lastServerSkateFriction ||
-                    serverSkateSpring != lastServerSkateSpring)
+                // VINTAGE STORY CONVENTION: Combine related state into an ITreeAttribute!
+                // Setting 7 independent attributes on the root WatchedAttributes generates 7 separate 
+                // modification paths and massively clutters network traffic. Grouping them inside an 
+                // ITreeAttribute and calling MarkPathDirty("iceskates") syncs everything in a single, lean packet.
+                if (cachedIsSkates != lastServerWearingSkates ||
+                    cachedSpeedBonus != lastServerSkateSpeedBonus ||
+                    cachedHandling != lastServerSkateHandling ||
+                    cachedBite != lastServerSkateBite ||
+                    cachedAcceleration != lastServerSkateAcceleration ||
+                    cachedFriction != lastServerSkateFriction ||
+                    cachedSpring != lastServerSkateSpring)
                 {
-                    entity.WatchedAttributes.SetBool("wearingSkates", serverWearingSkates);
-                    entity.WatchedAttributes.SetFloat("skateSpeedBonus", serverSkateSpeedBonus);
-                    entity.WatchedAttributes.SetFloat("skateHandling", serverSkateHandling);
-                    entity.WatchedAttributes.SetFloat("skateBite", serverSkateBite);
-                    entity.WatchedAttributes.SetFloat("skateAcceleration", serverSkateAcceleration);
-                    entity.WatchedAttributes.SetFloat("skateFriction", serverSkateFriction);
-                    entity.WatchedAttributes.SetFloat("skateSpring", serverSkateSpring);
+                    ITreeAttribute skateTree = entity.WatchedAttributes.GetOrAddTreeAttribute("iceskates");
 
-                    lastServerWearingSkates = serverWearingSkates;
-                    lastServerSkateSpeedBonus = serverSkateSpeedBonus;
-                    lastServerSkateHandling = serverSkateHandling;
-                    lastServerSkateBite = serverSkateBite;
-                    lastServerSkateAcceleration = serverSkateAcceleration;
-                    lastServerSkateFriction = serverSkateFriction;
-                    lastServerSkateSpring = serverSkateSpring;
+                    skateTree.SetBool("wearingSkates", cachedIsSkates);
+                    skateTree.SetFloat("skateSpeedBonus", cachedSpeedBonus);
+                    skateTree.SetFloat("skateHandling", cachedHandling);
+                    skateTree.SetFloat("skateBite", cachedBite);
+                    skateTree.SetFloat("skateAcceleration", cachedAcceleration);
+                    skateTree.SetFloat("skateFriction", cachedFriction);
+                    skateTree.SetFloat("skateSpring", cachedSpring);
+
+                    entity.WatchedAttributes.MarkPathDirty("iceskates");
+
+                    lastServerWearingSkates = cachedIsSkates;
+                    lastServerSkateSpeedBonus = cachedSpeedBonus;
+                    lastServerSkateHandling = cachedHandling;
+                    lastServerSkateBite = cachedBite;
+                    lastServerSkateAcceleration = cachedAcceleration;
+                    lastServerSkateFriction = cachedFriction;
+                    lastServerSkateSpring = cachedSpring;
                 }
             }
 
-            // Client and server grab synced values
-            bool wearingSkates = entity.WatchedAttributes.GetBool("wearingSkates", false);
-            float currentItemBonus = entity.WatchedAttributes.GetFloat("skateSpeedBonus", 1.2f);
-            float currentItemHandling = entity.WatchedAttributes.GetFloat("skateHandling", 0.5f);
-            float currentItemBite = entity.WatchedAttributes.GetFloat("skateBite", 5f);
-            float currentItemAcceleration = entity.WatchedAttributes.GetFloat("skateAcceleration", 2f);
-            float currentItemFriction = entity.WatchedAttributes.GetFloat("skateFriction", 0.995f);
-            float currentItemSpring = entity.WatchedAttributes.GetFloat("skateSpring", 0.5f);
+            // Client and server grab synced values from the unified tree
+            ITreeAttribute currentSkateTree = entity.WatchedAttributes.GetTreeAttribute("iceskates");
+            bool wearingSkates = currentSkateTree?.GetBool("wearingSkates", false) ?? false;
+            float currentItemBonus = currentSkateTree?.GetFloat("skateSpeedBonus", 1.2f) ?? 1.2f;
+            float currentItemHandling = currentSkateTree?.GetFloat("skateHandling", 0.5f) ?? 0.5f;
+            float currentItemBite = currentSkateTree?.GetFloat("skateBite", 5f) ?? 5f;
+            float currentItemAcceleration = currentSkateTree?.GetFloat("skateAcceleration", 2f) ?? 2f;
+            float currentItemFriction = currentSkateTree?.GetFloat("skateFriction", 0.995f) ?? 0.995f;
+            float currentItemSpring = currentSkateTree?.GetFloat("skateSpring", 0.5f) ?? 0.5f;
 
             // Check slightly further down (0.2 instead of 0.05) to prevent micro-bounces 
             // from making the game think we left the ice and rapidly toggling the stats.
@@ -710,8 +728,7 @@ namespace oh3iceskates
                     {
                         damageAccumulator += distTraveled;
 
-                        // Batch durability damage into chunks of 5 to prevent constant 
-                        // inventory sync packets, which cause severe hotbar and UI lag.
+                        // Batch durability damage into chunks to prevent excessive inventory sync packets
                         double damageThreshold = currentConfig.BlocksPerDamage * 5.0;
 
                         if (damageAccumulator >= damageThreshold)
@@ -761,36 +778,6 @@ namespace oh3iceskates
             }
         }
 
-        private float GetSkateSpeedBonus(ItemStack stack)
-        {
-            return stack?.Collectible?.Attributes?["skateSpeedBonus"]?.AsFloat(1.2f) ?? 1.2f;
-        }
-
-        private float GetSkateHandling(ItemStack stack)
-        {
-            return stack?.Collectible?.Attributes?["skateHandling"]?.AsFloat(0.5f) ?? 0.5f;
-        }
-
-        private float GetSkateBite(ItemStack stack)
-        {
-            return stack?.Collectible?.Attributes?["skateBite"]?.AsFloat(5f) ?? 5f;
-        }
-
-        private float GetSkateAcceleration(ItemStack stack, float defaultVal)
-        {
-            return stack?.Collectible?.Attributes?["skateAcceleration"]?.AsFloat(defaultVal) ?? defaultVal;
-        }
-
-        private float GetSkateFriction(ItemStack stack, float defaultVal)
-        {
-            return stack?.Collectible?.Attributes?["skateFriction"]?.AsFloat(defaultVal) ?? defaultVal;
-        }
-
-        private float GetSkateSpring(ItemStack stack, float defaultVal)
-        {
-            return stack?.Collectible?.Attributes?["skateSpring"]?.AsFloat(defaultVal) ?? defaultVal;
-        }
-
         private void DamageSkates(ItemSlot slot, int amount)
         {
             slot.Itemstack.Collectible.DamageItem(entity.World, entity, slot, amount);
@@ -800,8 +787,11 @@ namespace oh3iceskates
         public override void OnEntityDespawn(EntityDespawnData reason)
         {
             base.OnEntityDespawn(reason);
-            // Safely unregister from the central list to prevent memory leaks when players log off
-            modSystem?.ActivePhysicsControllers.Remove(physicsController);
+            // VINTAGE STORY CONVENTION: Safely clean up our local physics tick listener!
+            if (clientPhysicsTickId.HasValue)
+            {
+                entity.World.UnregisterGameTickListener(clientPhysicsTickId.Value);
+            }
         }
     }
 }

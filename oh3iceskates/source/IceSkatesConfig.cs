@@ -12,7 +12,7 @@ namespace oh3iceskates
         public double SlalomSweetspot = 0.6; // Default 0.6 (80% of the boost is spread across this percentage of the window)
         public double BiteHandling = 0.8; // Default 0.8 (Minimum handling when the skates have bite)
         public double SpeedCeiling = 0.7; // Default 0.7
-        public double BrakeFriction = 0.998; // Default 0.998
+        public double BrakeFriction = 0.95; // Default 0.95
         public bool DebugMode = false;
 
         public IceSkatesConfig()

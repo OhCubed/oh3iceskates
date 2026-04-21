@@ -95,6 +95,9 @@
     <!-- External libraries -->
     <Reference Include="$(ExternalLibDir)/**/*.dll" Private="false" Condition="'$(ExternalLibDir)' != ''" />
   </ItemGroup>
+  <ItemGroup>
+    <Folder Include="resources\scripts\" />
+  </ItemGroup>
 
   <!-- Creating local settings file -->
   <Target Name="EnsureSettingsJson" BeforeTargets="ModInfo" Condition="!Exists('Properties\localSettings.props')">
