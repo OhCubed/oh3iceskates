@@ -1,4 +1,6 @@
 ﻿using System;
+using System.Reflection;
+using System.Linq.Expressions;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
 using Vintagestory.API.Common.Entities;
@@ -30,6 +32,9 @@ namespace oh3iceskates
         public float PlayerWalkSpeed { get; set; } = 1.0f;
         public IceSkatesConfig Config { get; set; }
 
+        // O(1) direct reference to the slope behavior passed by the main behavior tick
+        public EntityBehavior SlopeAwareBehavior { get; set; }
+
         private Entity entity;
         private EntityPlayer entityPlayer;
 
@@ -51,6 +56,14 @@ namespace oh3iceskates
         private double lastSweetspot = -1.0;
         private double cachedCurveExponent = 1.0;
 
+        // Compiled reflection delegates for 0-allocation native-speed property access
+        private EntityBehavior cachedSlopeLib;
+        private System.Func<EntityBehavior, double> getDistance;
+        private System.Func<EntityBehavior, Vec3d> getNormal;
+
+        private static readonly Vec3d defaultNormal = new Vec3d(0, 1, 0);
+        private static readonly IceSkatesConfig fallbackConfig = new IceSkatesConfig();
+
         public IceSkatesPhysics(Entity entity)
         {
             this.entity = entity;
@@ -66,8 +79,8 @@ namespace oh3iceskates
                 return;
             }
 
-            // Grab the globally synced config passed down from the behavior. Fallback just in case.
-            IceSkatesConfig cfg = Config ?? new IceSkatesConfig();
+            // Grab the globally synced config passed down from the behavior. Fallback safely without allocation.
+            IceSkatesConfig cfg = Config ?? fallbackConfig;
 
             bool isSneaking = entityPlayer.Controls.Sneak;
 
@@ -99,8 +112,71 @@ namespace oh3iceskates
                 lastSweetspot = currentSlalomSweetspot;
             }
 
-            if (entity.OnGround)
+            double vx = entity.Pos.Motion.X;
+            double vz = entity.Pos.Motion.Z;
+
+            // Bypass vanilla friction by restoring the velocity from the previous tick, 
+            // unless a horizontal collision occurred.
+            if (entity.CollidedHorizontally || !wasActive)
             {
+                lastVx = vx;
+                lastVz = vz;
+                wasActive = true;
+            }
+            else
+            {
+                vx = lastVx;
+                vz = lastVz;
+            }
+
+            // Compile high-performance lambda delegates if the slope behavior reference is new.
+            // This completely circumvents the DLR overhead and boxing/unboxing memory leaks of the `dynamic` keyword.
+            if (SlopeAwareBehavior != null && cachedSlopeLib != SlopeAwareBehavior)
+            {
+                cachedSlopeLib = SlopeAwareBehavior;
+                Type type = cachedSlopeLib.GetType();
+                PropertyInfo distProp = type.GetProperty("DistanceToSurface");
+                PropertyInfo normalProp = type.GetProperty("SurfaceNormal");
+
+                if (distProp != null && normalProp != null)
+                {
+                    var instanceParam = Expression.Parameter(typeof(EntityBehavior), "instance");
+                    var castInstance = Expression.Convert(instanceParam, type);
+
+                    var distPropAccess = Expression.Property(castInstance, distProp);
+                    getDistance = Expression.Lambda<System.Func<EntityBehavior, double>>(distPropAccess, instanceParam).Compile();
+
+                    var normalPropAccess = Expression.Property(castInstance, normalProp);
+                    getNormal = Expression.Lambda<System.Func<EntityBehavior, Vec3d>>(normalPropAccess, instanceParam).Compile();
+                }
+            }
+            else if (SlopeAwareBehavior == null)
+            {
+                cachedSlopeLib = null;
+            }
+
+            double distToSurface = 99.0;
+            Vec3d normal = defaultNormal;
+
+            if (cachedSlopeLib != null && getDistance != null)
+            {
+                distToSurface = getDistance(cachedSlopeLib);
+                Vec3d slopeNormal = getNormal(cachedSlopeLib);
+                if (slopeNormal != null)
+                {
+                    normal = slopeNormal; // Zero-allocation reference assignment
+                }
+            }
+
+            // Determine if the custom suspension is active. Vanilla entity.OnGround is insufficient 
+            // because the hover offset lifts the collision box. We require normal.Y > 0.1 so sheer 
+            // walls don't count as ground for the purpose of acceleration and carving.
+            bool customOnGround = (distToSurface <= (cfg.HoverHeight + 0.6) && normal.Y > 0.1) || entity.OnGround;
+
+            if (customOnGround)
+            {
+                double currentAbsSpeed = Math.Sqrt(vx * vx + vz * vz);
+
                 // Calculate the bell curve for the slalom boost
                 double currentCurve = 0.0;
 
@@ -122,26 +198,6 @@ namespace oh3iceskates
                 }
 
                 double boostMultiplier = 1.0 + (currentSlalomBoost * currentCurve);
-
-                double vx = entity.Pos.Motion.X;
-                double vz = entity.Pos.Motion.Z;
-
-                // Bypass vanilla friction by restoring the velocity from the previous tick, 
-                // unless a horizontal collision occurred.
-                if (entity.CollidedHorizontally || !wasActive)
-                {
-                    lastVx = vx;
-                    lastVz = vz;
-                    wasActive = true;
-                }
-                else
-                {
-                    vx = lastVx;
-                    vz = lastVz;
-                }
-
-                // Track the speed right before friction is applied to monitor spring momentum
-                double currentAbsSpeed = Math.Sqrt(vx * vx + vz * vz);
 
                 if (isSneaking && !wasSneaking)
                 {
@@ -439,13 +495,6 @@ namespace oh3iceskates
                     double dynamicCapCalc = Math.Sqrt(dynamicCapSq);
                     entity.World.Api.Logger.Debug($"[IceSkates] CurSpeed: {currentSpeedCalc:F4} | TopSpeed: {topSpeedLimit:F4} | DynCap: {dynamicCapCalc:F4} | SlalomLimit: {boostedLimit:F4} | Curve: {currentCurve:F2}");
                 }
-
-                // Apply velocity to the entity and store the state for the next tick
-                entity.Pos.Motion.X = vx;
-                entity.Pos.Motion.Z = vz;
-
-                lastVx = vx;
-                lastVz = vz;
             }
             else
             {
@@ -458,19 +507,19 @@ namespace oh3iceskates
 
                 if (wasActive)
                 {
-                    double airSpeedSq = lastVx * lastVx + lastVz * lastVz;
+                    double airSpeedSq = vx * vx + vz * vz;
 
                     if (entity.CollidedHorizontally)
                     {
                         // Stop our custom momentum if we smack into a wall mid-air
-                        lastVx = entity.Pos.Motion.X;
-                        lastVz = entity.Pos.Motion.Z;
+                        vx = entity.Pos.Motion.X;
+                        vz = entity.Pos.Motion.Z;
                     }
                     else if (airSpeedSq < 0.01) // 0.01 absolute speed squared (stationary breakpoint)
                     {
                         // At a stationary speed, restore normal jumping/air control by NOT overwriting motion
-                        lastVx = entity.Pos.Motion.X;
-                        lastVz = entity.Pos.Motion.Z;
+                        vx = entity.Pos.Motion.X;
+                        vz = entity.Pos.Motion.Z;
                     }
                     else
                     {
@@ -494,22 +543,50 @@ namespace oh3iceskates
                         {
                             double frictionFactor = Math.Max(0, currentFrictionMult);
                             double timeNormalizedFriction = Math.Pow(frictionFactor, dt * 30.0);
-                            lastVx *= timeNormalizedFriction;
-                            lastVz *= timeNormalizedFriction;
+                            vx *= timeNormalizedFriction;
+                            vz *= timeNormalizedFriction;
                         }
-
-                        // Overwriting the engine's X and Z here strips away vanilla air-control
-                        entity.Pos.Motion.X = lastVx;
-                        entity.Pos.Motion.Z = lastVz;
                     }
                 }
                 else
                 {
                     // Not skating prior to being airborne. Keep our tracker synced.
-                    lastVx = entity.Pos.Motion.X;
-                    lastVz = entity.Pos.Motion.Z;
+                    vx = entity.Pos.Motion.X;
+                    vz = entity.Pos.Motion.Z;
                 }
             }
+
+            // --- 3D Suspension (All Directions) ---
+            // We apply this at the very end, outside the ground locomotion check.
+            // This ensures the spring acts as a 3D bumper against walls and ceilings too,
+            // and guarantees that horizontal bounces aren't crushed by the skating speed caps!
+            if (distToSurface <= cfg.HoverHeight + 0.6)
+            {
+                double displacement = cfg.HoverHeight - distToSurface;
+
+                // Calculate the velocity component exactly along the surface normal (dot product)
+                double velocityAlongNormal = (vx * normal.X) +
+                                             (entity.Pos.Motion.Y * normal.Y) +
+                                             (vz * normal.Z);
+
+                // F = (k * x) - (c * v)
+                double springForce = (cfg.SpringStiffness * displacement) - (cfg.SpringDamping * velocityAlongNormal);
+
+                // Clamp the force so it only pushes OUT (away from the surface). 
+                if (springForce < 0) springForce = 0;
+
+                // Apply suspension force directly along the surface normal vector. 
+                vx += normal.X * springForce * dt;
+                entity.Pos.Motion.Y += normal.Y * springForce * dt;
+                vz += normal.Z * springForce * dt;
+            }
+
+            // Apply velocity to the entity and store the state for the next tick
+            entity.Pos.Motion.X = vx;
+            entity.Pos.Motion.Z = vz;
+
+            lastVx = vx;
+            lastVz = vz;
         }
     }
 
@@ -554,6 +631,14 @@ namespace oh3iceskates
         private float lastServerSkateFriction = -1f;
         private float lastServerSkateSpring = -1f;
 
+        private bool behaviorChangePending = false;
+        private bool targetWearingSkates = false;
+
+        // Cached globals and delegates to prevent memory leaks in the tick loop
+        private System.Action<float> applyBehaviorChangeDelegate;
+        private JsonObject cachedSlopelibConfig;
+        private static readonly IceSkatesConfig fallbackConfig = new IceSkatesConfig();
+
         public EntityBehaviorIceSkater(Entity entity) : base(entity)
         {
         }
@@ -570,8 +655,11 @@ namespace oh3iceskates
             entityPlayer = entity as EntityPlayer;
             lastPos.Set(entity.Pos.X, entity.Pos.Y, entity.Pos.Z);
 
-            // We no longer blindly register physics for every player here! 
-            // We wait until OnGameTick can verify if this entity belongs to the local client.
+            // Pre-allocate our callback delegate to prevent generating new garbage closures on every equip/unequip
+            applyBehaviorChangeDelegate = ApplyBehaviorChange;
+
+            // Cache the JSON tree to prevent expensive parsing every time skates are equipped
+            cachedSlopelibConfig = JsonObject.FromJson("{ \"slopelib\": { \"diameter\": 2.0, \"yoffset\": 1.0 } }");
         }
 
         public override void OnGameTick(float deltaTime)
@@ -596,8 +684,8 @@ namespace oh3iceskates
                 }
             }
 
-            // Pull the correct configuration from the ModSystem Dictionary early
-            IceSkatesConfig currentConfig = modSystem?.GetConfigForPlayer(entityPlayer.PlayerUID);
+            // Pull the correct configuration from the ModSystem safely without allocation
+            IceSkatesConfig currentConfig = modSystem?.GetConfigForPlayer(entityPlayer.PlayerUID) ?? fallbackConfig;
 
             if (!entity.Alive || entity.State != EnumEntityState.Active)
             {
@@ -708,9 +796,31 @@ namespace oh3iceskates
             float currentItemFriction = currentSkateTree?.GetFloat("skateFriction", 0.995f) ?? 0.995f;
             float currentItemSpring = currentSkateTree?.GetFloat("skateSpring", 0.5f) ?? 0.5f;
 
+            // Handle dynamic addition/removal of the SlopeLib behavior when skates are toggled
+            var slopeAware = entity.GetBehavior("slopeaware");
+            bool hasSlopeAware = slopeAware != null;
+
+            // Immediately hand the reference down to the 0ms Physics tick to prevent list iterations
+            if (physicsController != null && physicsController.SlopeAwareBehavior != slopeAware)
+            {
+                physicsController.SlopeAwareBehavior = slopeAware;
+            }
+
+            if (wearingSkates != hasSlopeAware && !behaviorChangePending)
+            {
+                behaviorChangePending = true;
+                targetWearingSkates = wearingSkates;
+
+                // Defer the addition/removal of behaviors to prevent modifying the entity's behavior list 
+                // while the game engine is actively enumerating over it during OnGameTick.
+                entity.World.RegisterCallback(applyBehaviorChangeDelegate, 0);
+            }
+
             // Check slightly further down (0.2 instead of 0.05) to prevent micro-bounces 
             // from making the game think we left the ice and rapidly toggling the stats.
-            tmpPos.Set((int)Math.Floor(entity.Pos.X), (int)Math.Floor(entity.Pos.Y - 0.2), (int)Math.Floor(entity.Pos.Z));
+            // Offset by the target HoverHeight to ensure we check the block below the suspension.
+            double hoverDist = currentConfig.HoverHeight;
+            tmpPos.Set((int)Math.Floor(entity.Pos.X), (int)Math.Floor(entity.Pos.Y - hoverDist - 0.2), (int)Math.Floor(entity.Pos.Z));
             Block blockBelow = entity.World.BlockAccessor.GetBlock(tmpPos);
 
             bool isIce = blockBelow?.BlockMaterial == EnumBlockMaterial.Ice;
@@ -724,7 +834,7 @@ namespace oh3iceskates
 
                 if (entity.World.Side == EnumAppSide.Server && entityPlayer.Controls.TriesToMove && entity.OnGround)
                 {
-                    if (currentConfig?.BlocksPerDamage > 0 && footSlot != null)
+                    if (currentConfig.BlocksPerDamage > 0 && footSlot != null)
                     {
                         damageAccumulator += distTraveled;
 
@@ -744,6 +854,34 @@ namespace oh3iceskates
             {
                 SetSkatingActive(false, 0, 0, 5f, 2f, 0.995f, 0.5f);
             }
+        }
+
+        private void ApplyBehaviorChange(float dt)
+        {
+            if (targetWearingSkates)
+            {
+                if (entity.GetBehavior("slopeaware") == null)
+                {
+                    EntityBehavior newSlopeAware = entity.Api.ClassRegistry.CreateEntityBehavior(entity, "slopeaware");
+                    if (newSlopeAware != null)
+                    {
+                        newSlopeAware.Initialize(entity.Properties, cachedSlopelibConfig);
+                        entity.AddBehavior(newSlopeAware);
+                        if (physicsController != null) physicsController.SlopeAwareBehavior = newSlopeAware;
+                    }
+                }
+            }
+            else
+            {
+                EntityBehavior behaviorToRemove = entity.GetBehavior("slopeaware");
+                if (behaviorToRemove != null)
+                {
+                    entity.RemoveBehavior(behaviorToRemove);
+                    if (physicsController != null) physicsController.SlopeAwareBehavior = null;
+                }
+            }
+
+            behaviorChangePending = false;
         }
 
         private void SetSkatingActive(bool active, float bonus, float handling, float bite, float acceleration, float friction, float spring)

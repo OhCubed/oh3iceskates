@@ -13,6 +13,12 @@ namespace oh3iceskates
         public double BiteHandling = 0.8; // Default 0.8 (Minimum handling when the skates have bite)
         public double SpeedCeiling = 0.7; // Default 0.7
         public double BrakeFriction = 0.95; // Default 0.95
+
+        // --- New Suspension & Hover Physics ---
+        public double HoverHeight = 0.15; // Target visual offset/hover height above the ice
+        public double SpringStiffness = 180.0; // Hooke's Law (k) - how violently it fights gravity
+        public double SpringDamping = 14.0; // Hooke's Law (c) - prevents infinite bouncing
+
         public bool DebugMode = false;
 
         public IceSkatesConfig()
